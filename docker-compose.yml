@@ -1,0 +1,30 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-linkforge_owner}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_owner}
+      POSTGRES_DB: ${POSTGRES_DB:-linkforge}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-linkforge_owner}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  # backend / worker services get added in Week 2-3 once the app is stable
+  # locally — deliberately left out of Compose for now so `alembic` and
+  # `uvicorn` are easy to run/debug directly on the host during Week 1.
+
+volumes:
+  pgdata:
