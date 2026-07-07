@@ -30,6 +30,25 @@ async def get_authn_db() -> AsyncIterator[AsyncSession]:
         yield session
 
 
+# Separate engine/pool for the public redirect-only role. Never used for
+# authenticated dashboard queries — see migration 0002 for why mixing this
+# into linkforge_app caused a real cross-tenant leak.
+redirect_engine = create_async_engine(settings.database_url_redirect, pool_pre_ping=True)
+RedirectSessionLocal = async_sessionmaker(redirect_engine, expire_on_commit=False)
+
+
+async def get_redirect_db() -> AsyncIterator[AsyncSession]:
+    async with RedirectSessionLocal() as session:
+        yield session
+
+
+# Used by the arq worker (app/worker.py), NOT by FastAPI request handling —
+# the worker is a separate process with no HTTP requests to depend-inject
+# into, so this is used directly as `async with WorkerSessionLocal() as s`.
+worker_engine = create_async_engine(settings.database_url_worker, pool_pre_ping=True)
+WorkerSessionLocal = async_sessionmaker(worker_engine, expire_on_commit=False)
+
+
 @asynccontextmanager
 async def tenant_scoped_session(tenant_id: UUID) -> AsyncIterator[AsyncSession]:
     """
@@ -51,11 +70,3 @@ async def tenant_scoped_session(tenant_id: UUID) -> AsyncIterator[AsyncSession]:
                 {"tid": str(tenant_id)},
             )
             yield session
-
-redirect_engine = create_async_engine(settings.database_url_redirect, pool_pre_ping=True)
-RedirectSessionLocal = async_sessionmaker(redirect_engine, expire_on_commit=False)
-
-
-async def get_redirect_db() -> AsyncIterator[AsyncSession]:
-    async with RedirectSessionLocal() as session:
-        yield session

@@ -71,3 +71,20 @@ class Link(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     tenant: Mapped["Tenant"] = relationship(back_populates="links")
+
+
+class Click(Base):
+    """
+    Written ONLY by the arq worker (app/worker.py), never by a request
+    handler directly — that's the whole point of Week 2's async tracking:
+    the redirect path enqueues a job and returns immediately; this row gets
+    inserted later, on the worker's own schedule, by a separate process
+    connecting as the narrow `linkforge_worker` DB role.
+    """
+
+    __tablename__ = "clicks"
+
+    id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
+    link_id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), ForeignKey("links.id"), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import get_current_token, get_tenant_db
 from app.models import Link
+from app.rate_limit import rate_limiter
 from app.schemas import LinkCreate, LinkResponse
 from app.security import TokenPayload
 
@@ -17,7 +18,12 @@ def _generate_code() -> str:
     return secrets.token_urlsafe(6)  # ~8 url-safe chars
 
 
-@router.post("", response_model=LinkResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=LinkResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limiter(times=5, seconds=60, key_prefix="create_link"))],
+)
 async def create_link(
     body: LinkCreate,
     db: AsyncSession = Depends(get_tenant_db),

@@ -1,34 +1,61 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+import json
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_redirect_db
 from app.models import Link
+from app.redis_client import redis_client
 
 router = APIRouter(tags=["redirect"])
 
+CACHE_TTL_SECONDS = 300  # how long a resolved link stays cached before we
+# re-check Postgres. Trade-off: if a link is deactivated, it can still
+# resolve from cache for up to this long. Fine for a link shortener; would
+# need active cache invalidation on deactivate for something stricter.
+
 
 @router.get("/r/{code}")
-async def redirect_to_target(code: str, session: AsyncSession = Depends(get_redirect_db)):
+async def redirect_to_target(
+    code: str,
+    request: Request,
+    session: AsyncSession = Depends(get_redirect_db),
+):
     """
-    Deliberately public — no JWT, no tenant context set. Runs as the
-    `linkforge_redirect` role, which has ONLY the `public_redirect_read`
-    policy and ONLY SELECT on `links` (see migration 0002). This role is
-    NEVER shared with authenticated dashboard queries — that separation is
-    exactly what fixes the cross-tenant leak the isolation test caught
-    (`linkforge_app` used to hold both policies, and Postgres ORs permissive
-    policies together per role+command, so the dashboard's list query was
-    unintentionally exposed to every tenant's active links).
+    Week 2: Redis-cached redirect, decoupled async click tracking.
 
-    Week 1's naive version: hits Postgres on every request. Week 2 puts
-    Redis in front of this exact lookup — keep this handler as the "before"
-    baseline for the load test, don't optimise it yet.
+    1. Check Redis first (`link:{code}`). On a hit, skip Postgres entirely
+       — this is the "after" side of the Week 3 load-test comparison.
+    2. On a miss, fall back to the Week 1 query (still via the narrow
+       `linkforge_redirect` role + RLS), then populate the cache so the
+       next request for this code is a hit.
+    3. Either way, do NOT write the click to Postgres here. Enqueue a job
+       onto the arq/Redis queue and return the redirect immediately — the
+       separate worker process (app/worker.py) does the actual INSERT on
+       its own schedule. This is what keeps a write-heavy analytics path
+       from ever slowing down the latency-sensitive redirect path.
     """
-    result = await session.execute(select(Link).where(Link.code == code))
-    link = result.scalar_one_or_none()
+    cache_key = f"link:{code}"
+    cached = await redis_client.get(cache_key)
 
-    if link is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Link not found")
+    if cached is not None:
+        link_data = json.loads(cached)
+    else:
+        result = await session.execute(select(Link).where(Link.code == code))
+        link = result.scalar_one_or_none()
+        if link is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Link not found")
 
-    return RedirectResponse(url=link.target_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+        link_data = {
+            "id": str(link.id),
+            "tenant_id": str(link.tenant_id),
+            "target_url": link.target_url,
+        }
+        await redis_client.set(cache_key, json.dumps(link_data), ex=CACHE_TTL_SECONDS)
+
+    # Fire-and-forget: enqueue click tracking, don't block the redirect on it.
+    await request.app.state.arq_pool.enqueue_job("track_click", link_data["id"], link_data["tenant_id"])
+
+    return RedirectResponse(url=link_data["target_url"], status_code=status.HTTP_307_TEMPORARY_REDIRECT)

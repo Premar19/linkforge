@@ -63,6 +63,41 @@ uvicorn app.main:app --reload
 ```
 
 ## Progress log (fill in as you go — this becomes your CV bullets later)
-- [ ] Week 1: data model, JWT auth w/ tenant claims, RLS policies, create+redirect
-- [ ] Week 2: Redis cache, arq worker for async click tracking, per-tenant rate limiting
+- [x] Week 1: data model, JWT auth w/ tenant claims, RLS policies, create+redirect
+- [x] Week 2: Redis cache, arq worker for async click tracking, per-tenant rate limiting
 - [ ] Week 3: React dashboard (SSE), k6 load test + published numbers, Docker Compose, Fly.io deploy
+
+### Week 1 retrospective
+- Automated tenant-isolation test caught a real bug: initial RLS design put
+  both the tenant-scoped policy and the public-redirect policy on the same
+  DB role. Postgres OR's permissive policies per role+command, so the
+  dashboard's list-links query was unintentionally exposed to every
+  tenant's active links via the redirect policy.
+- Fixed by splitting into a dedicated `linkforge_redirect` role with no
+  other table access — migration 0002.
+
+### Week 2 retrospective
+- Redis-cached the redirect lookup (`link:{code}` → JSON of id/tenant_id/
+  target_url, 5 min TTL) so repeated hits skip Postgres entirely — this is
+  the baseline the Week 3 load test will measure against.
+- Click tracking is fully decoupled from the redirect path: the handler
+  enqueues a job onto Redis (via `arq`) and returns immediately; a separate
+  worker process does the actual Postgres write on its own schedule.
+- Caught a second real bug via the worker's own error logs (not a
+  pre-written test this time, just watching it run): `linkforge_worker` was
+  granted **INSERT only** on `clicks` (least-privilege, by design), but
+  SQLAlchemy's ORM auto-appends a `RETURNING` clause to fetch
+  server-generated columns (`created_at`) back into Python — and Postgres
+  requires **SELECT** privilege for anything named in `RETURNING`, not just
+  INSERT. Fixed by switching the worker to a raw SQL `INSERT` with no
+  `RETURNING`, so the true minimum privilege (INSERT-only) actually holds.
+  Worth knowing cold for an interview: "least privilege" has to account for
+  what your ORM does under the hood, not just what your code appears to ask
+  for.
+- Also relied on `arq`'s built-in retry to prove the pipeline is resilient:
+  jobs that failed against the old worker code were still sitting in the
+  queue and succeeded automatically once the bug was fixed and the worker
+  restarted — nothing was silently dropped.
+- Rate limiting: fixed-window per-tenant counter in Redis (`INCR` +
+  `EXPIRE`), scoped to tenant_id from the JWT, not per-user — a heavy
+  individual still counts against their whole team's shared quota.
