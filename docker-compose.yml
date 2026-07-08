@@ -1,3 +1,25 @@
+x-backend-env: &backend-env
+  # Inside Docker's network, containers reach each other by SERVICE NAME
+  # (db, redis), not localhost — that's the one thing that's different from
+  # running uvicorn/arq directly on your host like you have been so far.
+  # Passwords are pulled from the same root .env file docker compose already
+  # reads automatically.
+  DATABASE_URL: postgresql+asyncpg://linkforge_app:${APP_DB_PASSWORD:-changeme_app}@db:5432/${POSTGRES_DB:-linkforge}
+  DATABASE_URL_AUTHN: postgresql+asyncpg://linkforge_authn:${AUTHN_DB_PASSWORD:-changeme_authn}@db:5432/${POSTGRES_DB:-linkforge}
+  DATABASE_URL_REDIRECT: postgresql+asyncpg://linkforge_redirect:${REDIRECT_DB_PASSWORD:-changeme_redirect}@db:5432/${POSTGRES_DB:-linkforge}
+  DATABASE_URL_WORKER: postgresql+asyncpg://linkforge_worker:${WORKER_DB_PASSWORD:-changeme_worker}@db:5432/${POSTGRES_DB:-linkforge}
+  DATABASE_URL_MIGRATIONS: postgresql+asyncpg://linkforge_owner:${POSTGRES_PASSWORD:-changeme_owner}@db:5432/${POSTGRES_DB:-linkforge}
+  REDIS_URL: redis://redis:6379/0
+  JWT_SECRET: ${JWT_SECRET:-dev-only-secret-change-in-prod}
+  JWT_ALGORITHM: HS256
+  ACCESS_TOKEN_EXPIRE_MINUTES: "60"
+  # Also needed so migrate's CREATE ROLE statements set the SAME passwords
+  # used above, instead of falling back to their own hardcoded defaults.
+  APP_DB_PASSWORD: ${APP_DB_PASSWORD:-changeme_app}
+  AUTHN_DB_PASSWORD: ${AUTHN_DB_PASSWORD:-changeme_authn}
+  REDIRECT_DB_PASSWORD: ${REDIRECT_DB_PASSWORD:-changeme_redirect}
+  WORKER_DB_PASSWORD: ${WORKER_DB_PASSWORD:-changeme_worker}
+
 services:
   db:
     image: postgres:16-alpine
@@ -21,10 +43,48 @@ services:
     restart: unless-stopped
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
-  # backend / worker services get added in Week 2-3 once the app is stable
-  # locally — deliberately left out of Compose for now so `alembic` and
-  # `uvicorn` are easy to run/debug directly on the host during Week 1.
+  # One-shot migration runner — NOT started by a plain `docker compose up`.
+  # Run explicitly, once, whenever there's a new migration:
+  #     docker compose run --rm migrate
+  migrate:
+    build: ./backend
+    command: alembic upgrade head
+    environment:
+      <<: *backend-env
+    depends_on:
+      db:
+        condition: service_healthy
+    profiles: ["tools"]
+
+  api:
+    build: ./backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *backend-env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: ./backend
+    command: arq app.worker.WorkerSettings
+    environment:
+      <<: *backend-env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
 volumes:
   pgdata:
