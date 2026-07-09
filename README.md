@@ -1,3 +1,4 @@
+![LinkForge live dashboard demo](linkforge-recording.gif)
 # LinkForge — Multi-Tenant Link Shortening & Analytics Platform
 
 Status: **Week 3 in progress** (load testing done; dashboard, Docker Compose, deploy still to come)
