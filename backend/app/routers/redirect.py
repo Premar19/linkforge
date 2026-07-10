@@ -42,6 +42,11 @@ async def redirect_to_target(
 
     if cached is not None:
         link_data = json.loads(cached)
+        # Purpose-built counter, isolated from arq's own Redis traffic on
+        # this same instance (job enqueue/dequeue also generates GETs/SETs,
+        # which would otherwise contaminate Redis's own global
+        # keyspace_hits/misses counters if we tried to read those instead).
+        await redis_client.incr("metrics:cache_hit")
     else:
         result = await session.execute(select(Link).where(Link.code == code))
         link = result.scalar_one_or_none()
@@ -54,6 +59,7 @@ async def redirect_to_target(
             "target_url": link.target_url,
         }
         await redis_client.set(cache_key, json.dumps(link_data), ex=CACHE_TTL_SECONDS)
+        await redis_client.incr("metrics:cache_miss")
 
     # Fire-and-forget: enqueue click tracking, don't block the redirect on it.
     await request.app.state.arq_pool.enqueue_job("track_click", link_data["id"], link_data["tenant_id"])
